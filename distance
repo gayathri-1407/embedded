@@ -1,0 +1,147 @@
+#include <stdint.h>
+#include "tm4c123gh6pm.h"
+#include <stdio.h>
+
+#define TRIG_PIN   (1U << 6)  // PB6
+#define ECHO_PIN   (1U << 7)  // PB7
+#define BLUE_LED   (1U << 2)  // PF2 (Blue LED)
+
+// Function Prototypes
+void delayMicroseconds(uint32_t us);
+void delayMilliseconds(uint32_t ms);
+void PortB_Init(void);
+void PortF_Init(void);
+void Timer1A_Capture_Init(void);
+void UART0_Init(void);
+void UART0_SendString(char *str);
+uint32_t measureDistance(void);
+
+int main(void) {
+    char buffer[20];
+    uint32_t distance;
+    
+    PortB_Init();           // Initialize GPIO for Ultrasonic Sensor
+    PortF_Init();           // Initialize GPIO for LED
+    Timer1A_Capture_Init(); // Initialize Timer1A for capture mode
+    UART0_Init();           // Initialize UART0 for serial communication
+    
+    while (1) {
+        distance = measureDistance();
+        
+        snprintf(buffer, sizeof(buffer), "Distance: %u cm\r\n", distance);
+        UART0_SendString(buffer);
+        
+        if (distance > 2 && distance < 400) {  // Valid distance range
+            GPIO_PORTF_DATA_R |= BLUE_LED;  // Turn ON Blue LED
+        } else {
+            GPIO_PORTF_DATA_R &= ~BLUE_LED; // Turn OFF Blue LED
+        }
+
+        delayMilliseconds(500); // 500ms delay
+    }
+}
+
+// Initialize Port B for Ultrasonic Sensor
+void PortB_Init(void) {
+    SYSCTL_RCGCGPIO_R |= (1U << 1);  // Enable Clock for Port B
+    while ((SYSCTL_PRGPIO_R & (1U << 1)) == 0);
+
+    GPIO_PORTB_DIR_R |= TRIG_PIN;  // PB6 as Output (Trigger)
+    GPIO_PORTB_DIR_R &= ~ECHO_PIN; // PB7 as Input (Echo)
+    
+    GPIO_PORTB_DEN_R |= (TRIG_PIN | ECHO_PIN); // Enable Digital Function
+}
+
+// Initialize Port F for LED
+void PortF_Init(void) {
+    SYSCTL_RCGCGPIO_R |= (1U << 5);  // Enable Clock for Port F
+    while ((SYSCTL_PRGPIO_R & (1U << 5)) == 0);
+
+    GPIO_PORTF_DIR_R |= BLUE_LED;  // Set PF2 as Output (Blue LED)
+    GPIO_PORTF_DEN_R |= BLUE_LED;  // Enable Digital Function
+}
+
+// Initialize Timer1A in Capture Mode for Echo Pin
+void Timer1A_Capture_Init(void) {
+    SYSCTL_RCGCTIMER_R |= (1U << 1); // Enable Timer1
+    while ((SYSCTL_PRTIMER_R & (1U << 1)) == 0);
+
+    TIMER1_CTL_R &= ~(1U << 0);  // Disable Timer1A
+    TIMER1_CFG_R = 0x04;         // Configure for 16-bit mode
+    TIMER1_TAMR_R = 0x17;        // Capture mode, Edge-Time, Count-Up
+    TIMER1_CTL_R |= (1U << 2);   // Capture on both edges
+    TIMER1_ICR_R = (1U << 2);    // Clear Capture Event
+    TIMER1_CTL_R |= (1U << 0);   // Enable Timer1A
+}
+
+// Initialize UART0 for serial communication
+void UART0_Init(void) {
+    SYSCTL_RCGCUART_R |= (1U << 0); // Enable UART0
+    SYSCTL_RCGCGPIO_R |= (1U << 0); // Enable Clock for Port A
+    
+    while ((SYSCTL_PRUART_R & (1U << 0)) == 0);
+    while ((SYSCTL_PRGPIO_R & (1U << 0)) == 0);
+    
+    GPIO_PORTA_AFSEL_R |= (1U << 1) | (1U << 0); // Enable alternate functions for PA0, PA1
+    GPIO_PORTA_PCTL_R = (1U << 0) | (1U << 4);  // Configure PA0, PA1 for UART
+    GPIO_PORTA_DEN_R |= (1U << 1) | (1U << 0); // Enable digital function
+    
+    UART0_CTL_R &= ~(1U << 0); // Disable UART0
+    UART0_IBRD_R = 104;        // 16MHz / (16 * 9600) = 104.1667
+    UART0_FBRD_R = 11;         // Fractional part 0.1667 * 64 + 0.5 = 11
+    UART0_LCRH_R = (0x3 << 5); // 8-bit, no parity, 1-stop bit
+    UART0_CC_R = 0x0;          // Use system clock
+    UART0_CTL_R |= (1U << 0) | (1U << 8) | (1U << 9); // Enable UART0, TXE, RXE
+}
+
+// Function to send a string via UART0
+void UART0_SendString(char *str) {
+    while (*str) {
+        while ((UART0_FR_R & (1U << 5)) != 0); // Wait until TX buffer is empty
+        UART0_DR_R = *str;
+        str++;
+    }
+}
+
+// Function to measure distance
+uint32_t measureDistance(void) {
+    uint32_t startTime, endTime, pulseWidth;
+    
+    // Send Trigger Pulse
+    GPIO_PORTB_DATA_R &= ~TRIG_PIN;
+    delayMicroseconds(2);
+    GPIO_PORTB_DATA_R |= TRIG_PIN;
+    delayMicroseconds(10);
+    GPIO_PORTB_DATA_R &= ~TRIG_PIN;
+
+    // Wait for Echo to go HIGH (Start Timing)
+    while ((GPIO_PORTB_DATA_R & ECHO_PIN) == 0);
+
+    TIMER1_TAV_R = 0;  // Clear Timer
+    startTime = TIMER1_TAV_R;
+
+    // Wait for Echo to go LOW (End Timing)
+    while ((GPIO_PORTB_DATA_R & ECHO_PIN) != 0);
+
+    endTime = TIMER1_TAV_R;
+    pulseWidth = endTime - startTime; // Pulse Width in Timer Ticks
+
+    // Convert Pulse Width to Distance (in cm)
+    return (pulseWidth * 0.017);  // Speed of sound formula
+}
+
+// Microsecond delay function
+void delayMicroseconds(uint32_t us) {
+    int i;
+    for (i = 0; i < (us * 3); i++) {
+        __asm("NOP");
+    }
+}
+
+// Millisecond delay function
+void delayMilliseconds(uint32_t ms) {
+    uint32_t i;
+    for (i = 0; i < (ms * 4000); i++) {
+        __asm("NOP");
+    }
+}
